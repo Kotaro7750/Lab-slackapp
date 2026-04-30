@@ -1,0 +1,6 @@
+[tools]
+go = "1.26.2"
+"npm:cc-sdd" = "3"
+
+[env]
+_.file = ".env"

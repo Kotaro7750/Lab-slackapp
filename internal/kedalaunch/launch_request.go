@@ -1,0 +1,18 @@
+package kedalaunch
+
+import (
+	"context"
+	"time"
+
+	domainclient "github.com/Kotaro7750/keda-launcher-scaler/pkg/client"
+)
+
+const kedaLaunchTimeout = 10 * time.Second
+
+// launchRequest sends a KEDA launcher request with a bounded wait time.
+func (c *kedaLaunchCommand) launchRequest(req domainclient.LaunchRequest) (domainclient.AcceptedRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), kedaLaunchTimeout)
+	defer cancel()
+
+	return c.launcher.Launch(ctx, req)
+}

@@ -1,0 +1,10 @@
+.git
+.github
+.agents
+.codex
+.kiro
+.gocache
+
+.env
+.env.*
+!.env.example
