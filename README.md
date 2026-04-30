@@ -37,14 +37,52 @@ cp .env.example .env
 
 ## Slack App Configuration
 
-Configure the Slack App as follows.
+Create the app with `Create New App > From an app manifest`, then paste this manifest.
 
-1. Enable Socket Mode in `Settings > Socket Mode`.
-2. Create an App-Level Token with the `connections:write` scope in `Basic Information > App-Level Tokens`.
-3. Add `commands` to `OAuth & Permissions > Bot Token Scopes`.
-4. Add `/launch` in `Slash Commands`. If you change `SLACK_LAUNCH_COMMAND`, keep the Slack command name in sync.
-5. Enable `Interactivity & Shortcuts`.
-6. Reinstall the app to the workspace and get the Bot Token.
+```json
+{
+  "display_information": {
+    "name": "Lab Slack App",
+    "description": "Launch KEDA ScaledObjects from Slack."
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "lab-slackapp",
+      "always_online": false
+    },
+    "slash_commands": [
+      {
+        "command": "/launch",
+        "description": "Open the KEDA launch request form.",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "commands"
+      ]
+    }
+  },
+  "settings": {
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
+```
+
+After creating the app from the manifest:
+
+1. Install the app to the workspace and copy the Bot User OAuth Token to `SLACK_BOT_TOKEN`.
+2. Create an App-Level Token with the `connections:write` scope and copy it to `SLACK_APP_TOKEN`.
+3. If you change `/launch` in the manifest, set the same value in `SLACK_LAUNCH_COMMAND`.
+
+Slash command and interactivity request URLs are omitted because Socket Mode delivers those payloads over the app's WebSocket connection.
 
 ## Run
 
