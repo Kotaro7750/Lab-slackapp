@@ -38,6 +38,7 @@ func Register(handler *socketmode.SocketmodeHandler, api *slack.Client, cfg Conf
 	handler.HandleSlashCommand(cfg.CommandName, command.handleSlashCommand)
 	handler.HandleViewSubmission(kedaLaunchCallbackID, command.handleLaunchSubmission)
 	handler.HandleInteractionBlockAction(kedaChangeActionID, command.handleChangeAction)
+	handler.HandleInteractionBlockAction(kedaCancelActionID, command.handleCancelAction)
 	handler.HandleViewSubmission(kedaChangeCallbackID, command.handleChangeSubmission)
 
 	return nil

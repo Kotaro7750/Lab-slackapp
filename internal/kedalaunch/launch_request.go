@@ -16,3 +16,11 @@ func (c *kedaLaunchCommand) launchRequest(req domainclient.LaunchRequest) (domai
 
 	return c.launcher.Launch(ctx, req)
 }
+
+// cancelRequest sends a KEDA delete request with the same bounded wait time as launch.
+func (c *kedaLaunchCommand) cancelRequest(req domainclient.DeleteRequest) (domainclient.DeletedRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), kedaLaunchTimeout)
+	defer cancel()
+
+	return c.launcher.DeleteRequest(ctx, req)
+}

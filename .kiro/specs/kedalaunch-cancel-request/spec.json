@@ -1,0 +1,22 @@
+{
+  "feature_name": "kedalaunch-cancel-request",
+  "created_at": "2026-05-01T00:52:40+0900",
+  "updated_at": "2026-05-01T08:56:46+0900",
+  "language": "ja",
+  "phase": "tasks-generated",
+  "approvals": {
+    "requirements": {
+      "generated": true,
+      "approved": true
+    },
+    "design": {
+      "generated": true,
+      "approved": true
+    },
+    "tasks": {
+      "generated": true,
+      "approved": true
+    }
+  },
+  "ready_for_implementation": false
+}

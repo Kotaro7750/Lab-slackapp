@@ -1,7 +1,6 @@
 package kedalaunch
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,19 +13,8 @@ const (
 	kedaChangeActionID   = "change_keda_launch_request"
 )
 
-// kedaRequestMetadata carries an accepted request through the change-duration flow.
-type kedaRequestMetadata struct {
-	RequestID   string `json:"request_id"`
-	Namespace   string `json:"namespace"`
-	Name        string `json:"name"`
-	Duration    string `json:"duration"`
-	UserID      string `json:"user_id"`
-	ChannelID   string `json:"channel_id"`
-	ResponseURL string `json:"response_url"`
-}
-
 // buildKedaChangeModal creates the form used to update an accepted request duration.
-func buildKedaChangeModal(metadata kedaRequestMetadata, encodedMetadata string) slack.ModalViewRequest {
+func buildKedaChangeModal(metadata acceptedRequestMetadata, encodedMetadata string) slack.ModalViewRequest {
 	return slack.ModalViewRequest{
 		Type:            slack.VTModal,
 		CallbackID:      kedaChangeCallbackID,
@@ -47,7 +35,7 @@ func buildKedaChangeModal(metadata kedaRequestMetadata, encodedMetadata string) 
 
 // parseChangeSubmission validates a duration change while preserving the original target.
 func parseChangeSubmission(view slack.View) (domainclient.LaunchRequest, string, map[string]string) {
-	metadata, err := decodeKedaRequestMetadata(view.PrivateMetadata)
+	metadata, err := decodeAcceptedRequestMetadata(view.PrivateMetadata)
 	if err != nil {
 		return domainclient.LaunchRequest{}, "", map[string]string{kedaDurationBlockID: "Invalid form metadata."}
 	}
@@ -71,34 +59,14 @@ func parseChangeSubmission(view slack.View) (domainclient.LaunchRequest, string,
 	}, metadata.ResponseURL, nil
 }
 
-// metadataFromChangeAction extracts request metadata from the pressed change button.
-func metadataFromChangeAction(interaction slack.InteractionCallback) (kedaRequestMetadata, error) {
+// acceptedRequestActionFromChangeAction extracts the accepted-response contract from the pressed change button.
+func acceptedRequestActionFromChangeAction(interaction slack.InteractionCallback) (acceptedRequestAction, error) {
 	if len(interaction.ActionCallback.BlockActions) == 0 {
-		return kedaRequestMetadata{}, fmt.Errorf("missing block action")
+		return acceptedRequestAction{ResponseURL: interaction.ResponseURL}, fmt.Errorf("missing block action")
 	}
-	return decodeKedaRequestMetadata(interaction.ActionCallback.BlockActions[0].Value)
-}
-
-// encodeKedaRequestMetadata serializes request context for buttons and modals.
-func encodeKedaRequestMetadata(metadata kedaRequestMetadata) (string, error) {
-	raw, err := json.Marshal(metadata)
+	metadata, err := decodeAcceptedRequestMetadata(interaction.ActionCallback.BlockActions[0].Value)
 	if err != nil {
-		return "", err
+		return acceptedRequestAction{ResponseURL: interaction.ResponseURL}, err
 	}
-	return string(raw), nil
-}
-
-// decodeKedaRequestMetadata restores request context and checks required routing fields.
-func decodeKedaRequestMetadata(value string) (kedaRequestMetadata, error) {
-	var metadata kedaRequestMetadata
-	if strings.TrimSpace(value) == "" {
-		return kedaRequestMetadata{}, fmt.Errorf("metadata is empty")
-	}
-	if err := json.Unmarshal([]byte(value), &metadata); err != nil {
-		return kedaRequestMetadata{}, err
-	}
-	if metadata.RequestID == "" || metadata.Namespace == "" || metadata.Name == "" || metadata.ResponseURL == "" {
-		return kedaRequestMetadata{}, fmt.Errorf("missing required metadata")
-	}
-	return metadata, nil
+	return acceptedRequestAction{Metadata: metadata, ResponseURL: interaction.ResponseURL}, nil
 }

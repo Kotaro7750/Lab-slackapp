@@ -21,26 +21,25 @@ func (c *kedaLaunchCommand) handleChangeAction(evt *socketmode.Event, client *so
 		return
 	}
 
-	metadata, err := metadataFromChangeAction(interaction)
+	action, err := acceptedRequestActionFromChangeAction(interaction)
 	if err != nil {
 		slog.Error("failed to decode change action metadata", "error", err)
+		if action.ResponseURL != "" {
+			c.postEphemeralError(context.Background(), action.ResponseURL, "Failed to open change form.", false)
+		}
 		return
 	}
-	if interaction.ResponseURL != "" {
-		// Block action payloads can provide a fresher response URL than the button metadata.
-		metadata.ResponseURL = interaction.ResponseURL
-	}
 
-	encoded, err := encodeKedaRequestMetadata(metadata)
+	encoded, err := encodeAcceptedRequestMetadata(action.Metadata)
 	if err != nil {
 		slog.Error("failed to encode change modal metadata", "error", err)
-		c.postEphemeralError(context.Background(), metadata.ResponseURL, "Failed to open change form.", false)
+		c.postEphemeralError(context.Background(), action.Metadata.ResponseURL, "Failed to open change form.", false)
 		return
 	}
 
-	if _, err := c.api.OpenViewContext(context.Background(), interaction.TriggerID, buildKedaChangeModal(metadata, encoded)); err != nil {
+	if _, err := c.api.OpenViewContext(context.Background(), interaction.TriggerID, buildKedaChangeModal(action.Metadata, encoded)); err != nil {
 		slog.Error("failed to open change modal", "error", err)
-		c.postEphemeralError(context.Background(), metadata.ResponseURL, "Failed to open change form.", false)
+		c.postEphemeralError(context.Background(), action.Metadata.ResponseURL, "Failed to open change form.", false)
 	}
 }
 

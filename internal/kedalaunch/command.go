@@ -11,6 +11,7 @@ import (
 // kedaLauncher is the subset of the KEDA launcher client used by this feature.
 type kedaLauncher interface {
 	Launch(context.Context, domainclient.LaunchRequest) (domainclient.AcceptedRequest, error)
+	DeleteRequest(context.Context, domainclient.DeleteRequest) (domainclient.DeletedRequest, error)
 }
 
 // kedaLaunchCommand owns the dependencies used by the /launch Slack flow.
