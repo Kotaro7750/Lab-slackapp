@@ -1,6 +1,32 @@
 [tools]
 go = "1.26.2"
 "npm:cc-sdd" = "3"
+"npm:@stoplight/prism-cli" = "latest"
 
 [env]
 _.file = ".env"
+
+[tasks.dev]
+run = '''
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+pids=()
+
+cleanup() {
+  trap - INT TERM EXIT
+  kill "${pids[@]}" 2>/dev/null || true
+  wait "${pids[@]}" 2>/dev/null || true
+}
+
+trap cleanup INT TERM EXIT
+
+go run . &
+pids+=("$!")
+
+prism mock ../keda-launcher-scaler/internal/common/contracts/receivers/http/openapi.yaml -p 8080 &
+pids+=("$!")
+
+wait "${pids[@]}"
+cleanup
+'''
