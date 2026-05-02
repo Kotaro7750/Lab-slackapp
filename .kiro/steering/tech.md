@@ -51,13 +51,28 @@ Optional/defaulted variables:
 
 テストは repo-owned behavior を対象にする。Slack SDK や `socketmode` の内部 map、block 構造そのものを細かく再検証するテストは避ける。
 
+`internal/kedalaunch` では、現在の責務境界に合わせて package ごとに次の方針を取る。
+
+- `ui`: modal 入力の parse/validate、`private_metadata` の encode/decode、Slack modal/message の構築結果をユニットテストする。
+- `handler`: `KedaLauncherIF` と `SlackResponderIF` を fake に置き換え、ack、validation error、modal open、launcher 呼び出し、follow-up response 投稿までの処理フローをテストする。
+- `keda_launcher_client`: この repo が所有する timeout 付与ポリシーのみをテストする。
+- `slack_responder`: 外部 SDK への薄い委譲は原則テスト対象にせず、repo 固有の純粋関数がある場合のみ最小限テストする。
+
 Good test targets:
 
 - modal submit から正しい `LaunchRequest` が作られる。
 - invalid input が Slack view submission error になる。
-- KEDA launcher client へ期待する request が送られる。
-- accepted response に change duration 用 metadata が含まれる。
+- `/launch` slash command が ack 後に初回 modal を開く。
+- launch submit が KEDA launcher に期待する request を送る。
+- accepted response に change duration / cancel 用 metadata が含まれる。
 - change duration submit が request id と ScaledObject を維持し、duration だけ更新する。
+- KEDA launcher 送信失敗時に ephemeral error を返す。
+
+Avoid:
+
+- Slack SDK や `socketmode` 自体の挙動確認だけを目的としたテスト。
+- mock が呼ばれた回数だけを確認する薄いテスト。
+- リファクタリング前のファイル分割や内部 helper を前提にしたテスト設計。
 
 ## Common Commands
 

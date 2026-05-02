@@ -2,430 +2,403 @@
 
 ## Overview
 
-この feature は、Slack `/launch` 利用者が accepted 済みの KEDA launch request を、同じ accepted response から直接取り消せるようにする。既存の change duration と同じ request lifecycle 上に cancel を追加し、request id と ScaledObject を再入力させずに delete API を呼び出す。
+この feature は、Slack `/launch` フローで受理済みになった KEDA launch request を、同じ accepted response から変更または取り消しできるようにする。現在の実装では、初回 slash command から launch modal を開き、modal submit で launch を送信し、accepted response に `Change duration` と `Cancel` の follow-up action を表示する。
 
-対象利用者は `/launch` 実行者であり、Slack 上の ephemeral response を操作面として使う。現在の `internal/kedalaunch` は launch submit と change duration をすでに扱っているため、この設計はその extension として accepted response artifact、KEDA client seam、Slack callback 登録を最小限に広げる。
+初期の設計では `internal/kedalaunch` 直下のファイル分割を前提にしていたが、現在のコードベースでは責務が次の 4 層に整理されている。
+
+- `register.go`: feature の配線と callback 登録
+- `handler/`: Slack event の orchestration
+- `ui/`: modal / message / metadata artifact
+- `keda_launcher_client/`, `slack_responder/`: 外部依存との小さな feature-local seam
+
+この設計書は、実装済みの現在構成を source of truth として記述する。
 
 ### Goals
-- accepted response に cancel 導線を追加する
-- accepted response の metadata を使って delete API を実行する
-- cancel 成功時は Slack 上で canceled 状態を確認できるようにする
-- cancel 失敗時は request が未取消であることを利用者に返す
+
+- accepted response から duration change と cancel を実行できる
+- request id と ScaledObject を再入力させず、accepted response の metadata を再利用する
+- Slack interactive event は upstream 呼び出し前に ack する
+- launch / change / cancel の Slack 応答と upstream KEDA request 実行を分離する
 
 ### Non-Goals
-- launch 対象一覧 UI の導入
+
+- request 一覧 UI や管理画面の導入
 - cancel 確認 modal の追加
-- receiver 側の delete 意味論や error contract の変更
-- `internal/kedalaunch` 全体の大規模リネームや package 再編
+- upstream receiver の API 契約変更
+- `main.go` まで含む broader app architecture の再設計
 
 ## Boundary Commitments
 
 ### This Spec Owns
-- accepted response における cancel button の表示と metadata 付与
-- Slack block action からの cancel 実行フロー
-- upstream client `DeleteRequest` の呼び出しと、その結果を Slack 応答へ変換すること
-- cancel 成功時の response artifact と、失敗時の利用者通知
+
+- `/launch` feature 内で使う modal, accepted response, cancel success response の artifact
+- accepted response から follow-up action へ渡す metadata contract
+- launch / change / cancel の Slack callback orchestration
+- upstream `Launch` / `DeleteRequest` 呼び出しに対する timeout policy
 
 ### Out of Boundary
-- KEDA launcher receiver が `404` をどのように意味づけるかの変更
-- 一覧 API を用いた launch 対象選択や request 管理画面
-- Slack 権限制御や複数利用者間の可視性ルール変更
-- accepted response 以外から request を cancel する新しい UI
+
+- `keda-launcher-scaler` 側の `DeleteRequest` / `DeletedRequest` 意味論
+- Slack App 設定、権限、slash command のインストールフロー
+- accepted response 以外の UI からの request 変更・取消
+- response URL post failure に対する retry / durable queue
 
 ### Allowed Dependencies
-- `github.com/Kotaro7750/keda-launcher-scaler v0.1.4` の `pkg/client` と `pkg/client/http`
-- 既存の `slack-go/slack` および `socketmode`
-- 既存 `internal/kedalaunch` の ack / webhook response helper
+
+- `github.com/slack-go/slack` と `socketmode`
+- `github.com/Kotaro7750/keda-launcher-scaler/pkg/client`
+- `github.com/Kotaro7750/keda-launcher-scaler/pkg/client/http`
 
 ### Revalidation Triggers
-- upstream `DeleteRequest` / `DeletedRequest` の shape 変更
+
 - accepted response metadata の必須項目変更
-- Slack follow-up 操作が accepted response 以外へ移る変更
-- KEDA request timeout や response posting の責務境界変更
+- Slack callback / action ID の変更
+- upstream client interface の shape 変更
+- `internal/kedalaunch` の package 境界変更
 
-## Architecture
+## Current Architecture
 
-### Existing Architecture Analysis
-- `register.go` が `/launch` と関連 callback を登録し、user flow 順に handler を並べている。
-- `launch_request.go` は launch の upstream 呼び出しと timeout を所有し、Slack response posting は caller に任せている。
-- `accepted_response.go` は accepted message artifact を組み立て、change duration button metadata を埋め込んでいる。
-- `change_duration.go` と `change_duration_modal.go` は accepted response を起点に request id と ScaledObject を維持した再送を行っている。
-
-この feature では既存の dependency direction を維持する。
-
-`Accepted response artifact and metadata` → `cancel flow handler` → `KEDA request gateway` → `upstream client`
-
-Slack ack と webhook posting は `cancel flow handler` から `slack_response.go` を通じて利用するが、upstream delete 呼び出し自体は gateway seam に閉じる。
-
-### Architecture Pattern & Boundary Map
+### High-Level Structure
 
 ```mermaid
 graph TB
-    User --> AcceptedResponse
-    AcceptedResponse --> CancelAction
-    AcceptedResponse --> ChangeAction
-    CancelAction --> CancelHandler
-    ChangeAction --> ChangeHandler
-    CancelHandler --> RequestGateway
-    ChangeHandler --> RequestGateway
-    RequestGateway --> KedaClient
-    CancelHandler --> SlackWebhook
-    ChangeHandler --> SlackWebhook
+    User --> SlashCommand
+    SlashCommand --> Register
+    Register --> Handler
+    Handler --> UI
+    Handler --> SlackResponder
+    Handler --> KedaLauncherClient
+    KedaLauncherClient --> UpstreamClient
 ```
 
-- **Selected pattern**: accepted response 起点の follow-up action extension
-- **Domain boundaries**:
-  - accepted response artifact は button 表示と metadata 契約を所有する
-  - cancel handler は Slack callback orchestration と利用者通知を所有する
-  - request gateway は timeout 付き upstream client 呼び出しを所有する
-- **Existing patterns preserved**:
-  - Slack interactive event は外部呼び出し前に ack する
-  - KEDA 送信処理と Slack 通知処理を分ける
-  - Slack artifact と metadata は artifact 近傍に置く
-- **New components rationale**:
-  - cancel flow 専用 handler file は change duration と責務を分けて user flow を追いやすくする
-  - accepted response metadata の共通化は follow-up action の追加に必要な最小 generalization である
-- **Steering compliance**:
-  - user flow を主軸にした file split を維持する
-  - upstream client をそのまま採用し、独自 wrapper を増やさない
+- `Register` は Slack handler 登録順を user flow 順に保つ
+- `Handler` は Slack payload の decode, ack, upstream call, Slack response posting を orchestration する
+- `UI` は modal / message / metadata の artifact を所有する
+- `SlackResponder` は Socket Mode ack と Slack Web API / response URL posting をまとめる
+- `KedaLauncherClient` は feature-local timeout policy だけを追加し、upstream client の API を隠しすぎない
 
-### Technology Stack
+### Flow Ordering
 
-| Layer | Choice / Version | Role in Feature | Notes |
-|-------|------------------|-----------------|-------|
-| Backend | Go 1.26.2 | 実装言語 | 既存 repo と同一 |
-| Slack Integration | `github.com/slack-go/slack` v0.23.0 | block action 受信、webhook response posting | 既存 Socket Mode path を継続 |
-| Upstream Client | `github.com/Kotaro7750/keda-launcher-scaler` v0.1.4 | `DeleteRequest` と `DeletedRequest` を提供 | `go.mod` 更新が必要 |
-| Runtime | existing Socket Mode app | ack と callback 実行環境 | Slack timeout 回避が要件 |
+`register.go` は、利用者がたどる順序で callback を登録する。
 
-## File Structure Plan
+1. slash command
+2. launch modal submit
+3. accepted response の change action
+4. accepted response の cancel action
+5. change duration modal submit
 
-### Directory Structure
+この順番により、巨大な flow 集約ファイルを作らずに user-visible flow を追えるようにしている。
+
+## File Structure
+
+### Current Directory Structure
+
 ```text
 internal/kedalaunch/
-├── register.go                # /launch 関連 callback の登録順を管理
-├── command.go                 # Slack flow が使う upstream seam を定義
-├── launch_request.go          # launch と cancel の upstream request gateway
-├── accepted_response.go       # accepted response artifact、follow-up metadata、cancel success artifact
-├── cancel_request.go          # cancel button callback、delete orchestration、Slack posting
-├── change_duration.go         # duration change flow
-├── change_duration_modal.go   # change duration modal artifact
-├── launch_submission.go       # launch submit flow
-└── slack_response.go          # ack と generic error response helper
+├── register.go
+├── handler/
+│   ├── handler.go
+│   ├── slash_command.go
+│   ├── launch_submission.go
+│   ├── change_duration.go
+│   └── cancel_request.go
+├── keda_launcher_client/
+│   ├── interface.go
+│   └── launcher.go
+├── slack_responder/
+│   ├── interface.go
+│   └── slack_responder.go
+└── ui/
+    ├── callback_id.go
+    ├── helper.go
+    ├── metadata.go
+    ├── launch_modal.go
+    ├── change_duration_modal.go
+    ├── accepted_message.go
+    └── cancel_message.go
 ```
 
-### Modified Files
-- `go.mod` — `github.com/Kotaro7750/keda-launcher-scaler` を `v0.1.4` へ更新する
-- `go.sum` — dependency update に伴う checksum 更新
-- `internal/kedalaunch/command.go` — `kedaLauncher` に `DeleteRequest` を追加する
-- `internal/kedalaunch/register.go` — cancel action handler を登録し、user flow 順を保つ
-- `internal/kedalaunch/launch_request.go` — cancel 用の timeout 付き upstream helper を追加する
-- `internal/kedalaunch/accepted_response.go` — cancel button、共通 metadata encode/decode、canceled success message を追加する
-- `internal/kedalaunch/change_duration.go` — accepted response metadata の新しい ownership に追従する
-- `internal/kedalaunch/change_duration_modal.go` — accepted response metadata の共通契約を consume する形へ調整する
-- `internal/kedalaunch/accepted_response_test.go` — change と cancel の両 button metadata を検証する
-- `internal/kedalaunch/change_duration_modal_test.go` — metadata 共通化後も change が request id / ScaledObject を維持することを検証する
+### Responsibility Map
 
-### New Files
-- `internal/kedalaunch/cancel_request.go` — cancel flow の handler と message posting を持つ
-- `internal/kedalaunch/cancel_request_test.go` — cancel request 変換と canceled success artifact を検証する
+| Path | Responsibility |
+|------|----------------|
+| `register.go` | upstream client と Slack responder を組み立て、callback を登録する |
+| `handler/handler.go` | handler が共有する依存を保持する |
+| `handler/slash_command.go` | slash command の ack と launch modal open を行う |
+| `handler/launch_submission.go` | launch modal submit を parse し、launch request を送る |
+| `handler/change_duration.go` | change action と change submit を扱う |
+| `handler/cancel_request.go` | cancel action を delete request と Slack response に変換する |
+| `ui/metadata.go` | slash command context と accepted response metadata の encode/decode を持つ |
+| `ui/launch_modal.go` | launch modal と launch request 変換を持つ |
+| `ui/change_duration_modal.go` | change duration modal と duration-only update 変換を持つ |
+| `ui/accepted_message.go` | accepted response artifact を組み立てる |
+| `ui/cancel_message.go` | canceled response artifact を組み立てる |
+| `slack_responder/` | Slack ack, modal open, response URL post の小さな adapter |
+| `keda_launcher_client/` | upstream launch / delete を timeout 付きで実行する |
 
 ## System Flows
+
+### 1. Launch Flow
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Slack
-    participant CancelHandler
-    participant RequestGateway
-    participant KedaClient
+    participant Handler
+    participant UI
+    participant Launcher
+    participant Webhook
+
+    User->>Slack: /launch
+    Slack->>Handler: SlashCommand
+    Handler->>Slack: Ack
+    Handler->>UI: BuildLaunchModal()
+    Handler->>Slack: OpenView
+    User->>Slack: Submit launch modal
+    Slack->>Handler: ViewSubmission
+    Handler->>UI: DecodeCommandInvocationMetadata()
+    Handler->>UI: ParseLaunchModal()
+    Handler->>Slack: Ack or view errors
+    Handler->>Launcher: LaunchRequest()
+    Handler->>Webhook: Post accepted response
+```
+
+### 2. Change Duration Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Slack
+    participant Handler
+    participant UI
+    participant Launcher
+    participant Webhook
+
+    User->>Slack: Press Change duration
+    Slack->>Handler: BlockAction
+    Handler->>UI: LaunchRequestMetadataFromAction()
+    Handler->>Slack: Ack
+    Handler->>Slack: Open change modal
+    User->>Slack: Submit change modal
+    Slack->>Handler: ViewSubmission
+    Handler->>UI: DecodeLaunchRequestMetadata()
+    Handler->>UI: ParseChangeDurationModal()
+    Handler->>Slack: Ack or view errors
+    Handler->>Launcher: LaunchRequest()
+    Handler->>Webhook: Replace accepted response
+```
+
+### 3. Cancel Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Slack
+    participant Handler
+    participant UI
+    participant Launcher
     participant Webhook
 
     User->>Slack: Press Cancel
-    Slack->>CancelHandler: Block action with metadata
-    CancelHandler->>Slack: Ack
-    CancelHandler->>RequestGateway: cancelRequest delete input
-    RequestGateway->>KedaClient: DeleteRequest
-    KedaClient-->>RequestGateway: DeletedRequest or error
-    RequestGateway-->>CancelHandler: result
-    CancelHandler->>Webhook: post success replace or failure notice
+    Slack->>Handler: BlockAction
+    Handler->>UI: LaunchRequestMetadataFromAction()
+    Handler->>Slack: Ack
+    Handler->>Launcher: CancelRequest()
+    Launcher-->>Handler: DeletedRequest or error
+    Handler->>Webhook: Replace accepted response or post error
 ```
-
-Key decisions:
-- ack は metadata decode や upstream delete より前に実行する
-- success は元の accepted response を canceled 状態へ置換する
-- failure は元 message を残し、request が未取消であることだけを通知する
-
-## Requirements Traceability
-
-| Requirement | Summary | Components | Interfaces | Flows |
-|-------------|---------|------------|------------|-------|
-| 1.1 | accepted response に cancel 導線を表示する | `accepted_response.go` | accepted response artifact contract | Cancel flow |
-| 1.2 | request context を再入力させない | `accepted_response.go`, `cancel_request.go` | accepted request metadata | Cancel flow |
-| 1.3 | `/launch` フロー配下で完結する | `register.go`, `cancel_request.go` | Slack block action handler | Cancel flow |
-| 2.1 | request id と ScaledObject に対して cancel を実行する | `cancel_request.go`, `launch_request.go` | `DeleteRequest` service interface | Cancel flow |
-| 2.2 | cancel 成功を Slack へ通知する | `cancel_request.go`, `accepted_response.go` | canceled success message contract | Cancel flow |
-| 2.3 | Slack timeout で再試行を強いられない | `cancel_request.go`, `slack_response.go` | ack sequencing rule | Cancel flow |
-| 3.1 | metadata 不正時は cancel せず利用者へ通知する | `cancel_request.go`, `accepted_response.go` | metadata decode contract | Cancel flow |
-| 3.2 | delete 失敗時は request 未取消を通知する | `cancel_request.go`, `slack_response.go` | failure response contract | Cancel flow |
-| 3.3 | 成功/失敗どちらでも利用者が判断できる応答を返す | `accepted_response.go`, `cancel_request.go`, `slack_response.go` | success and failure message contracts | Cancel flow |
 
 ## Components and Interfaces
 
-| Component | Domain | Intent | Requirements | Key Dependencies | Contracts |
-|-----------|--------|--------|--------------|------------------|-----------|
-| Accepted Response Artifact | Slack artifact | accepted message と follow-up metadata を組み立てる | 1.1, 1.2, 2.2, 3.1, 3.3 | `slack-go/slack` P0, `domainclient` P0 | Service, State |
-| Cancel Request Flow | Slack callback | cancel action を ack し、delete 実行と Slack 通知を orchestration する | 1.3, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3 | Accepted Response Artifact P0, Request Gateway P0, `slack_response.go` P1 | Service |
-| Request Gateway | Upstream integration | timeout 付きで launch と cancel の upstream 呼び出しを行う | 2.1, 2.3 | `keda-launcher-scaler/pkg/client` P0 | Service |
+### `register.go`
 
-### Slack Artifact Layer
+`Register()` は feature の composition root であり、以下を行う。
 
-#### Accepted Response Artifact
+- `SLACK_LAUNCH_COMMAND` が `/` で始まることを検証する
+- `httpclient.New(cfg.ReceiverURL)` で upstream HTTP client を構築する
+- `handler.NewKedaLaunchHandler(...)` に launcher と Slack responder を渡す
+- Slack callback を flow 順で登録する
 
-| Field | Detail |
-|-------|--------|
-| Intent | accepted request の表示状態と follow-up action metadata を一貫して所有する |
-| Requirements | 1.1, 1.2, 2.2, 3.1, 3.3 |
+このファイルは wiring に集中し、UI artifact や business logic を持たない。
 
-**Responsibilities & Constraints**
-- accepted response 本文に request id、ScaledObject、duration、effective window を表示する
-- change と cancel の両 button に同一 request lifecycle metadata を付与する
-- cancel success 後の replaced message を組み立てる
-- metadata 必須項目は `requestId`, `namespace`, `name`, `responseURL` とし、change でだけ `duration` を持つ
+### `handler.KedaLaunchHandler`
 
-**Dependencies**
-- Outbound: `slack-go/slack` — message blocks と button element 生成 (P0)
-- External: `domainclient.AcceptedRequest` / `domainclient.DeletedRequest` — upstream response shape (P0)
+`KedaLaunchHandler` は `/launch` feature の orchestration 層である。保持する依存は次の 3 つだけ。
 
-**Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [x]
+- `kedaLauncher`: upstream launch / delete 実行
+- `slackResponder`: Slack ack と follow-up response
+- `now`: request id 生成のための clock seam
 
-##### Service Interface
+各 handler の責務は次の通り。
+
+- `HandleSlashCommand`: slash command を ack し、launch modal を開く
+- `HandleLaunchSubmission`: launch modal を parse し、launch accepted response を返す
+- `HandleChangeAction`: accepted response metadata から change modal を開く
+- `HandleChangeSubmission`: duration だけを差し替えて launch を再送し、元メッセージを置換する
+- `HandleCancelAction`: accepted response metadata から delete request を作り、canceled message へ置換する
+
+### `ui` package
+
+`ui` は Slack artifact と artifact 間の state contract を所有する。
+
+#### Metadata Contracts
+
 ```go
-type acceptedRequestMetadata struct {
-	RequestID   string
-	Namespace   string
-	Name        string
-	Duration    string
-	ResponseURL string
+type CommandInvocationMetadata struct {
+    UserID      string
+    ChannelID   string
+    ResponseURL string
 }
 
-func acceptedLaunchMessage(
-	accepted domainclient.AcceptedRequest,
-	req domainclient.LaunchRequest,
-	responseURL string,
-	replaceOriginal bool,
-) *slack.WebhookMessage
-
-func canceledLaunchMessage(
-	deleted domainclient.DeletedRequest,
-	responseURL string,
-) *slack.WebhookMessage
-
-func encodeAcceptedRequestMetadata(metadata acceptedRequestMetadata) (string, error)
-func decodeAcceptedRequestMetadata(value string) (acceptedRequestMetadata, error)
-```
-- Preconditions:
-  - `responseURL` は空でない
-  - metadata は request id と ScaledObject を持つ
-- Postconditions:
-  - accepted message は change と cancel の follow-up action を含む
-  - canceled message は follow-up action を含まない
-- Invariants:
-  - accepted response metadata は request target を変更しない
-  - cancel success message は current request state を final として表す
-
-**Implementation Notes**
-- Integration:
-  - 既存 `findButton` ベースの artifact test を拡張し、cancel button も検証する
-- Validation:
-  - metadata decode 時に必須項目欠落なら error を返す
-- Risks:
-  - metadata ownership の移動で change flow が壊れないよう、change test を維持する
-
-### Callback Flow Layer
-
-#### Cancel Request Flow
-
-| Field | Detail |
-|-------|--------|
-| Intent | accepted response の cancel action を delete 実行と Slack 応答へ変換する |
-| Requirements | 1.3, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3 |
-
-**Responsibilities & Constraints**
-- Slack block action payload から metadata を取り出す
-- ack を先に返した上で delete を実行する
-- success なら replaced canceled message を投稿する
-- failure なら request が未取消であることを ephemeral error として投稿する
-- metadata が壊れている場合は delete を呼ばない
-
-**Dependencies**
-- Inbound: `register.go` — cancel action registration (P0)
-- Outbound: Request Gateway — upstream delete 実行 (P0)
-- Outbound: `slack_response.go` — error response posting (P1)
-- Outbound: Accepted Response Artifact — success message と metadata decode (P0)
-
-**Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [ ]
-
-##### Service Interface
-```go
-func (c *kedaLaunchCommand) handleCancelAction(
-	evt *socketmode.Event,
-	client *socketmode.Client,
-)
-```
-- Preconditions:
-  - payload は cancel button block action である
-- Postconditions:
-  - Slack event は一度だけ ack される
-  - metadata 正常時は delete を最大 1 回だけ試みる
-  - success 時は `ReplaceOriginal` された success message が投稿される
-- Invariants:
-  - request id と ScaledObject は metadata 由来で固定される
-  - failure は request active state を保持する前提で original message を残す
-
-**Implementation Notes**
-- Integration:
-  - `register.go` では launch submit の後に follow-up action として登録する
-- Validation:
-  - metadata 不正時の early error posting を行う
-- Risks:
-  - response URL が stale な場合でも receiver delete 実行は行われるため、post 失敗は log に残す
-
-### Upstream Integration Layer
-
-#### Request Gateway
-
-| Field | Detail |
-|-------|--------|
-| Intent | timeout 付きで upstream launch と cancel を実行する |
-| Requirements | 2.1, 2.3 |
-
-**Responsibilities & Constraints**
-- `kedaLauncher` interface に必要最小限の method だけを定義する
-- `launchRequest` と `cancelRequest` の両方で同じ timeout policy を適用する
-- Slack response posting は持たない
-
-**Dependencies**
-- Inbound: `launch_submission.go` — launch 実行 (P0)
-- Inbound: `cancel_request.go` — cancel 実行 (P0)
-- External: `domainclient.Client` subset — upstream transport-agnostic contract (P0)
-
-**Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [ ]
-
-##### Service Interface
-```go
-type kedaLauncher interface {
-	Launch(context.Context, domainclient.LaunchRequest) (domainclient.AcceptedRequest, error)
-	DeleteRequest(context.Context, domainclient.DeleteRequest) (domainclient.DeletedRequest, error)
+type LaunchRequestMetadata struct {
+    RequestID   string
+    Namespace   string
+    Name        string
+    Duration    string
+    ResponseURL string
 }
-
-func (c *kedaLaunchCommand) launchRequest(req domainclient.LaunchRequest) (domainclient.AcceptedRequest, error)
-func (c *kedaLaunchCommand) cancelRequest(req domainclient.DeleteRequest) (domainclient.DeletedRequest, error)
 ```
-- Preconditions:
-  - request id と ScaledObject は trim 済みである
-- Postconditions:
-  - upstream call は timeout 付き context で実行される
-- Invariants:
-  - timeout policy は launch と cancel で揃える
 
-**Implementation Notes**
-- Integration:
-  - `httpclient.New` から返る upstream client をそのまま使う
-- Validation:
-  - compile 時に `kedaLauncher` subset と upstream `HTTPClient` の整合を確認する
-- Risks:
-  - upstream version mismatch は dependency bump 時の build/test で検出する
+- `CommandInvocationMetadata` は slash command から initial launch modal submit までの文脈を保持する
+- `LaunchRequestMetadata` は accepted response から change / cancel の follow-up action までの文脈を保持する
+- `RequestID`, `Namespace`, `Name`, `ResponseURL` は required
+- `Duration` は change modal の初期値と resubmit 用に保持する
+
+#### Artifact Ownership
+
+- `BuildLaunchModal()` は slash command entrypoint の modal を組み立てる
+- `ParseLaunchModal()` は modal state から `domainclient.LaunchRequest` を生成する
+- `BuildChangeDurationModal()` は accepted response metadata を private metadata に再格納する
+- `ParseChangeDurationModal()` は request target を保持したまま duration だけ変更する
+- `BuildAcceptedMessage()` は change/cancel の両 button を含む accepted response を組み立てる
+- `BuildCancelMessage()` は `ReplaceOriginal=true` の final canceled message を組み立てる
+
+### `keda_launcher_client` package
+
+この package は upstream client 全体を抽象化するのではなく、feature で必要な最小 subset と timeout policy だけを持つ。
+
+```go
+type KedaLauncherIF interface {
+    Launch(context.Context, domainclient.LaunchRequest) (domainclient.AcceptedRequest, error)
+    DeleteRequest(context.Context, domainclient.DeleteRequest) (domainclient.DeletedRequest, error)
+}
+```
+
+- `LaunchRequest()` と `CancelRequest()` はどちらも `kedaLaunchTimeout` を適用する
+- transport 実装は `httpclient.New()` から返る upstream client に委譲する
+- Slack response posting はここでは扱わない
+
+### `slack_responder` package
+
+`slack_responder` は Slack SDK を完全に隠す層ではなく、handler が必要とする Slack 操作だけをまとめた feature-local seam である。
+
+- `AckWithSuccess()`: interactive event の通常 ack
+- `AckWithViewResponse()`: modal field error を返す ack
+- `AckWithUnrecoverableError()`: generic failure を返して interaction を終了する ack
+- `OpenViewContext()`: modal open
+- `PostWebhook()`: response URL への follow-up message post
+- `PostEphemeralError()`: short error response を送る
 
 ## Data Models
 
-### Domain Model
-- **Accepted Request Lifecycle Metadata**
-  - accepted response が follow-up 操作へ渡す value object
-  - request target identity を所有するが、request state 自体は所有しない
-- **Delete Request**
-  - upstream delete 実行の command object
-  - `requestId` と `ScaledObject` のみを持つ
-- **Deleted Request**
-  - upstream 成功時の response object
-  - canceled が適用された effective window を利用者に示す
+### Launch Request
 
-### Logical Data Model
+`ui.ParseLaunchModal()` は次の値から `domainclient.LaunchRequest` を組み立てる。
 
-**Structure Definition**:
-- `acceptedRequestMetadata`
-  - `requestId: string`
-  - `namespace: string`
-  - `name: string`
-  - `responseURL: string`
-  - `duration: string` optional for change flow reuse
-- `domainclient.DeleteRequest`
-  - `requestId`
-  - `scaledObject.namespace`
-  - `scaledObject.name`
-- `domainclient.DeletedRequest`
-  - `requestId`
-  - `scaledObject`
-  - `effectiveStart`
-  - `effectiveEnd`
+- `requestId`: `slack:{userID}:{channelID}:{namespace}/{name}:{unixNano}`
+- `scaledObject.namespace`
+- `scaledObject.name`
+- `duration`
 
-**Consistency & Integrity**:
-- metadata は Slack button value と modal private metadata 間でのみ受け渡す
-- cancel flow は metadata を authority として使い、他入力で request target を上書きしない
-- persistent storage は追加しない
+request id は slash command context と current time から生成し、同じ accepted response metadata に再格納される。
 
-### Data Contracts & Integration
+### Follow-Up Metadata
 
-**API Data Transfer**
-- Upstream client contract:
-  - method: `DeleteRequest(ctx, req)`
-  - request: `DeleteRequest{requestId, scaledObject}`
-  - success: `DeletedRequest`
-  - errors: transport error または upstream 404 を含む error
+`LaunchRequestMetadata` は change / cancel の authority であり、follow-up flow では request target をユーザーに再入力させない。
 
-**Cross-Service Data Management**
-- distributed transaction は持たない
-- Slack response posting と upstream delete は独立 operation であり、delete 成功後の Slack post 失敗は再試行責務をこの spec では持たない
+- change flow: `Duration` だけが変更可能
+- cancel flow: `RequestID`, `Namespace`, `Name` だけを使って delete request を作る
+
+### Deleted Request
+
+cancel 成功時は upstream `domainclient.DeletedRequest` を使い、Slack 上では次を表示する。
+
+- request id
+- scaled object
+- effective start
+- effective end
 
 ## Error Handling
 
-### Error Strategy
-- metadata decode failure は user-visible error として扱い、delete を呼ばない
-- upstream delete failure は request 未取消として通知する
-- Slack post failure は log に残すが、delete 自体の結果を巻き戻さない
+### Error Categories
 
-### Error Categories and Responses
-- **User visible state errors**:
-  - metadata invalid → `Failed to cancel launch request.` 系の error を ephemeral で返す
-  - delete failed or rejected → request がまだ active かもしれないことを示す error を返す
-- **System errors**:
-  - Slack webhook post failure → log only
-  - upstream timeout or transport failure → request 未取消として通知
+| Category | Current Handling |
+|----------|------------------|
+| launch/change modal の入力不正 | `AckWithViewResponse()` で field error を返す |
+| payload type 不一致 | `AckWithUnrecoverableError()` で generic failure を返す |
+| metadata decode failure | `AckWithUnrecoverableError()` で generic failure を返す |
+| upstream launch failure | response URL に ephemeral error を post する |
+| upstream cancel failure | `Launch request was not canceled and might still be active.` を post する |
+| Slack webhook post failure | `slog.Error` に記録し、retry は持たない |
 
-### Monitoring
-- `requestId`, `scaledObject.namespace`, `scaledObject.name` を cancel log に含める
-- metadata decode failure と upstream delete failure を別 message で log し、切り分け可能にする
+### Ack Strategy
+
+この feature の重要な invariant は、upstream KEDA call の前に Slack interactive event を ack すること。
+
+- slash command: modal open より前に ack
+- launch submit: validation 成功後、upstream launch 前に ack
+- change action: modal open より前に ack
+- change submit: validation 成功後、upstream launch 前に ack
+- cancel action: upstream delete 前に ack
+
+ただし現在の実装では、payload type mismatch や metadata decode failure のときは `AckWithUnrecoverableError()` を返して interaction を終了する。
+
+## Requirements Traceability
+
+| Requirement | Current Implementation |
+|-------------|------------------------|
+| 1.1 accepted response に cancel 導線を表示する | `ui.BuildAcceptedMessage()` |
+| 1.2 request context を再入力させない | `ui.LaunchRequestMetadata`, `ui.LaunchRequestMetadataFromAction()` |
+| 1.3 `/launch` フロー配下で完結する | `register.go`, `handler/` |
+| 2.1 request id と ScaledObject に対して cancel を実行する | `handler.HandleCancelAction()`, `keda_launcher_client.CancelRequest()` |
+| 2.2 cancel 成功を Slack へ通知する | `ui.BuildCancelMessage()`, `slack_responder.PostWebhook()` |
+| 2.3 Slack timeout で再試行を強いられない | handler 内の ack-first sequencing |
+| 3.1 metadata 不正時は cancel しない | `ui.DecodeLaunchRequestMetadata()`, `AckWithUnrecoverableError()` |
+| 3.2 delete 失敗時は request 未取消を通知する | `HandleCancelAction()` の error path |
+| 3.3 成功/失敗どちらでも判断できる応答を返す | accepted / canceled / ephemeral error artifact |
 
 ## Testing Strategy
 
-### Unit Tests
-- `accepted_response_test.go`: accepted response が change と cancel の両 button を持ち、cancel button metadata に request id と ScaledObject が入ることを検証する
-- `cancel_request_test.go`: accepted request metadata から `domainclient.DeleteRequest` を構成できることを検証する
-- `cancel_request_test.go`: canceled success message が `ReplaceOriginal` され、follow-up action を持たないことを検証する
-- `change_duration_modal_test.go`: metadata 共通化後も change flow が duration だけ変更し、request id / ScaledObject を維持することを検証する
+### Current Automated Coverage
 
-### Integration Tests
-- `go test ./...` により `kedaLauncher` interface と upstream `v0.1.4` の compile compatibility を確認する
-- cancel 追加後も既存 launch modal と change duration の parse / validation test が通ることを確認する
+- `ui/launch_modal_test.go`
+  - launch modal submit から正しい `LaunchRequest` を作れること
+  - invalid input を field error にできること
+- `ui/change_duration_modal_test.go`
+  - 現在はコメントアウトされており、実行対象になっていない
+- `handler/cancel_request_test.go`
+  - 現在はコメントアウトされており、実行対象になっていない
 
-### E2E or User Flow Checks
-- accepted launch response から Cancel を押した利用者が canceled 状態を Slack で確認できる
-- metadata 不正または delete 失敗時に、利用者が request 未取消だと判断できる Slack 応答を受ける
+### Intended Validation
 
-### Performance or Load
-- cancel action は launch / change と同様に外部呼び出し前 ack を維持し、Slack interactive timeout を避ける
+- `go test ./...`
+- launch / change / cancel の handler-level behavior test
+- Slack 実環境での manual smoke
 
-## Performance & Scalability
-- この feature で追加される外部呼び出しは 1 回の `DeleteRequest` のみで、既存 launch path と同等の負荷特性である
-- timeout policy は既存 `kedaLaunchTimeout` を再利用し、新しい retry layer は導入しない
+### Known Gaps
 
+- cancel flow の handler behavior が現状では自動テストで保護されていない
+- change flow の metadata reuse も `ui` test がコメントアウトされているため coverage gap がある
+- Slack runtime behavior は token と live receiver が必要なため manual verification 前提
+
+## Operational Notes
+
+- `SLACK_LAUNCH_COMMAND` は `/` で始まる必要がある
+- `KEDA_LAUNCHER_RECEIVER_URL` は upstream client 構築時に必須
+- sandbox では Go build cache 権限問題が起きるため、必要に応じて `GOCACHE=/tmp/...` を使う
+
+## Open Questions
+
+- metadata decode failure 時の UX を generic ack error のままにするか、context-aware な response URL error に戻すか
+- `handler` package のコメントアウト済みテストをどう復旧するか
+- `slack_responder` / `keda_launcher_client` の小さな seam をこのまま維持するか、feature-local helper に戻すか
