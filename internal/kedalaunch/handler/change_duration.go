@@ -27,6 +27,10 @@ func (k *KedaLaunchHandler) HandleChangeAction(evt *socketmode.Event, client *so
 		}
 		return
 	}
+	if interaction.ResponseURL != "" {
+		// Use the accepted-message action response URL so the follow-up submit can replace that artifact.
+		metadata.ResponseURL = interaction.ResponseURL
+	}
 
 	if err := k.slackResponder.AckWithSuccess(evt, client); err != nil {
 		slog.Error("failed to ack", "error", err)

@@ -380,6 +380,13 @@ func TestHandleChangeActionAcknowledgesAndOpensModal(t *testing.T) {
 	if responder.openView.CallbackID != ui.KedaChangeCallbackID {
 		t.Fatalf("callbackID = %q", responder.openView.CallbackID)
 	}
+	metadata, err := ui.DecodeLaunchRequestMetadata(responder.openView.PrivateMetadata)
+	if err != nil {
+		t.Fatalf("DecodeLaunchRequestMetadata() error = %v", err)
+	}
+	if metadata.ResponseURL != "https://hooks.slack.test/fallback" {
+		t.Fatalf("responseURL = %q", metadata.ResponseURL)
+	}
 }
 
 func TestHandleChangeSubmissionReturnsViewErrorsForInvalidDuration(t *testing.T) {
@@ -450,6 +457,9 @@ func TestHandleChangeSubmissionKeepsRequestTargetAndReplacesOriginalMessage(t *t
 	}
 	if len(responder.webhooks) != 1 {
 		t.Fatalf("webhooks = %d", len(responder.webhooks))
+	}
+	if responder.webhooks[0].responseURL != "https://hooks.slack.test/response" {
+		t.Fatalf("responseURL = %q", responder.webhooks[0].responseURL)
 	}
 	if !responder.webhooks[0].message.ReplaceOriginal {
 		t.Fatal("ReplaceOriginal = false")
