@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,16 +13,19 @@ import (
 
 // These IDs define the single launch form artifact: its fields, validation keys, and state lookup.
 const (
-	kedaNamespaceBlockID = "keda_namespace"
-	kedaNamespaceAction  = "namespace"
-	kedaNameBlockID      = "keda_scaled_object_name"
-	kedaNameAction       = "scaled_object_name"
-	KedaDurationBlockID  = "keda_duration"
-	kedaDurationAction   = "duration"
+	kedaTargetBlockID   = "keda_target"
+	kedaTargetAction    = "target"
+	KedaDurationBlockID = "keda_duration"
+	kedaDurationAction  = "duration"
 )
 
+type launchTargetRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
 // BuildLaunchModal creates the initial modal shown after the slash command entrypoint.
-func (metadata *CommandInvocationMetadata) BuildLaunchModal() slack.ModalViewRequest {
+func (metadata *CommandInvocationMetadata) BuildLaunchModal(candidates []domainclient.ScaledObject) slack.ModalViewRequest {
 	return slack.ModalViewRequest{
 		Type:            slack.VTModal,
 		CallbackID:      KedaLaunchCallbackID,
@@ -29,8 +34,7 @@ func (metadata *CommandInvocationMetadata) BuildLaunchModal() slack.ModalViewReq
 		Close:           slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false),
 		Submit:          slack.NewTextBlockObject(slack.PlainTextType, "Send", false, false),
 		Blocks: slack.Blocks{BlockSet: []slack.Block{
-			textInputBlock(kedaNamespaceBlockID, kedaNamespaceAction, "Namespace", "default", ""),
-			textInputBlock(kedaNameBlockID, kedaNameAction, "ScaledObject name", "worker", ""),
+			selectInputBlock(kedaTargetBlockID, kedaTargetAction, "Target", "Select a ScaledObject", buildTargetOptionGroups(candidates)),
 			textInputBlock(KedaDurationBlockID, kedaDurationAction, "Duration", "10m", ""),
 		}},
 	}
@@ -41,16 +45,12 @@ func (metadata *CommandInvocationMetadata) ParseLaunchModal(view slack.View, now
 	// Collect all field errors so Slack can render them beside each input at once.
 	fieldErrors := make(map[string]string)
 
-	namespace, namespaceOK := inputValue(view, kedaNamespaceBlockID, kedaNamespaceAction)
-	namespace = strings.TrimSpace(namespace)
-	if !namespaceOK || namespace == "" {
-		fieldErrors[kedaNamespaceBlockID] = "Namespace is required."
-	}
-
-	name, nameOK := inputValue(view, kedaNameBlockID, kedaNameAction)
-	name = strings.TrimSpace(name)
-	if !nameOK || name == "" {
-		fieldErrors[kedaNameBlockID] = "ScaledObject name is required."
+	targetValue, targetOK := selectValue(view, kedaTargetBlockID, kedaTargetAction)
+	target, err := decodeLaunchTarget(targetValue)
+	if !targetOK {
+		fieldErrors[kedaTargetBlockID] = "Target selection is required."
+	} else if err != nil {
+		fieldErrors[kedaTargetBlockID] = "Target selection is invalid."
 	}
 
 	durationValue, durationOK := inputValue(view, KedaDurationBlockID, kedaDurationAction)
@@ -65,13 +65,71 @@ func (metadata *CommandInvocationMetadata) ParseLaunchModal(view slack.View, now
 	}
 
 	return domainclient.LaunchRequest{
-		RequestID: generateRequestID(metadata.UserID, metadata.ChannelID, namespace, name, now),
-		ScaledObject: domainclient.ScaledObject{
-			Namespace: namespace,
-			Name:      name,
-		},
-		Duration: duration,
+		RequestID:    generateRequestID(metadata.UserID, metadata.ChannelID, target.Namespace, target.Name, now),
+		ScaledObject: target,
+		Duration:     duration,
 	}, nil
+}
+
+func selectInputBlock(blockID, actionID, label, placeholder string, optionGroups []*slack.OptionGroupBlockObject) *slack.InputBlock {
+	element := slack.NewOptionsGroupSelectBlockElement(
+		slack.OptTypeStatic,
+		slack.NewTextBlockObject(slack.PlainTextType, placeholder, false, false),
+		actionID,
+		optionGroups...,
+	)
+	return slack.NewInputBlock(blockID, slack.NewTextBlockObject(slack.PlainTextType, label, false, false), nil, element)
+}
+
+func buildTargetOptionGroups(candidates []domainclient.ScaledObject) []*slack.OptionGroupBlockObject {
+	grouped := make(map[string][]string)
+	for _, candidate := range candidates {
+		namespace := strings.TrimSpace(candidate.Namespace)
+		name := strings.TrimSpace(candidate.Name)
+		if namespace == "" || name == "" {
+			continue
+		}
+		grouped[namespace] = append(grouped[namespace], name)
+	}
+
+	namespaces := make([]string, 0, len(grouped))
+	for namespace := range grouped {
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+
+	optionGroups := make([]*slack.OptionGroupBlockObject, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		names := grouped[namespace]
+		sort.Strings(names)
+
+		options := make([]*slack.OptionBlockObject, 0, len(names))
+		for _, name := range names {
+			options = append(options, slack.NewOptionBlockObject(
+				mustEncodeLaunchTarget(namespace, name),
+				slack.NewTextBlockObject(slack.PlainTextType, name, false, false),
+				nil,
+			))
+		}
+
+		optionGroups = append(optionGroups, slack.NewOptionGroupBlockElement(
+			slack.NewTextBlockObject(slack.PlainTextType, namespace, false, false),
+			options...,
+		))
+	}
+
+	return optionGroups
+}
+
+func mustEncodeLaunchTarget(namespace, name string) string {
+	encoded, err := json.Marshal(launchTargetRef{
+		Namespace: strings.TrimSpace(namespace),
+		Name:      strings.TrimSpace(name),
+	})
+	if err != nil {
+		panic(fmt.Sprintf("string only struct couldn't return error on json.Marshal, but error occured: %v", err))
+	}
+	return string(encoded)
 }
 
 // generateRequestID creates a stable-enough request id for Slack-originated launches.

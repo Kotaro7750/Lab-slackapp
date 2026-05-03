@@ -34,3 +34,11 @@ func (k *KedaLauncher) CancelRequest(req domainclient.DeleteRequest) (domainclie
 
 	return k.client.DeleteRequest(ctx, req)
 }
+
+// ListScaledObjects fetches launch candidates with the same bounded wait time as launch and cancel.
+func (k *KedaLauncher) ListScaledObjects() ([]domainclient.ScaledObject, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), kedaLaunchTimeout)
+	defer cancel()
+
+	return k.client.ListScaledObjects(ctx)
+}

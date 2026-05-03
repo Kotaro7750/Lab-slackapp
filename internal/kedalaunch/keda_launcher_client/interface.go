@@ -10,4 +10,5 @@ import (
 type KedaLauncherIF interface {
 	Launch(context.Context, domainclient.LaunchRequest) (domainclient.AcceptedRequest, error)
 	DeleteRequest(context.Context, domainclient.DeleteRequest) (domainclient.DeletedRequest, error)
+	ListScaledObjects(context.Context) ([]domainclient.ScaledObject, error)
 }

@@ -24,6 +24,17 @@ func (k *KedaLaunchHandler) HandleSlashCommand(evt *socketmode.Event, client *so
 		slog.Error("failed to ack", "error", err)
 	}
 
+	candidates, err := k.kedaLauncher.ListScaledObjects()
+	if err != nil {
+		slog.Error("failed to load launch targets", "error", err)
+		k.slackResponder.PostEphemeralError(context.Background(), cmd.ResponseURL, "Failed to load launch targets.", false)
+		return
+	}
+	if len(candidates) == 0 {
+		k.slackResponder.PostEphemeralError(context.Background(), cmd.ResponseURL, "No launch targets are currently available.", false)
+		return
+	}
+
 	// Preserve Slack response context in private metadata for the modal submit.
 	metadata := ui.CommandInvocationMetadata{
 		UserID:      cmd.UserID,
@@ -31,7 +42,7 @@ func (k *KedaLaunchHandler) HandleSlashCommand(evt *socketmode.Event, client *so
 		ResponseURL: cmd.ResponseURL,
 	}
 
-	if _, err := k.slackResponder.OpenViewContext(context.Background(), cmd.TriggerID, metadata.BuildLaunchModal()); err != nil {
+	if _, err := k.slackResponder.OpenViewContext(context.Background(), cmd.TriggerID, metadata.BuildLaunchModal(candidates)); err != nil {
 		slog.Error("failed to open launch modal", "error", err)
 		k.slackResponder.PostEphemeralError(context.Background(), cmd.ResponseURL, "Failed to open launch form.", false)
 	}

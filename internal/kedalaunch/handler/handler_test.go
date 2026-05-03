@@ -14,14 +14,18 @@ import (
 )
 
 type fakeKedaLauncher struct {
-	launchReq  domainclient.LaunchRequest
-	launchResp domainclient.AcceptedRequest
-	launchErr  error
+	launchReq   domainclient.LaunchRequest
+	launchResp  domainclient.AcceptedRequest
+	launchErr   error
 	launchCalls int
 
-	cancelReq  domainclient.DeleteRequest
-	cancelResp domainclient.DeletedRequest
-	cancelErr  error
+	listResp  []domainclient.ScaledObject
+	listErr   error
+	listCalls int
+
+	cancelReq   domainclient.DeleteRequest
+	cancelResp  domainclient.DeletedRequest
+	cancelErr   error
 	cancelCalls int
 }
 
@@ -29,6 +33,11 @@ func (f *fakeKedaLauncher) Launch(ctx context.Context, req domainclient.LaunchRe
 	f.launchCalls++
 	f.launchReq = req
 	return f.launchResp, f.launchErr
+}
+
+func (f *fakeKedaLauncher) ListScaledObjects(ctx context.Context) ([]domainclient.ScaledObject, error) {
+	f.listCalls++
+	return f.listResp, f.listErr
 }
 
 func (f *fakeKedaLauncher) DeleteRequest(ctx context.Context, req domainclient.DeleteRequest) (domainclient.DeletedRequest, error) {
@@ -170,7 +179,11 @@ func findSectionText(t *testing.T, message *slack.WebhookMessage) string {
 }
 
 func TestHandleSlashCommandAcknowledgesAndOpensLaunchModal(t *testing.T) {
-	launcher := &fakeKedaLauncher{}
+	launcher := &fakeKedaLauncher{
+		listResp: []domainclient.ScaledObject{
+			{Namespace: "default", Name: "worker"},
+		},
+	}
 	responder := &fakeSlackResponder{}
 	handler := newTestHandler(launcher, responder)
 
@@ -189,6 +202,9 @@ func TestHandleSlashCommandAcknowledgesAndOpensLaunchModal(t *testing.T) {
 	if responder.openViewCalls != 1 {
 		t.Fatalf("openViewCalls = %d", responder.openViewCalls)
 	}
+	if launcher.listCalls != 1 {
+		t.Fatalf("listCalls = %d", launcher.listCalls)
+	}
 	if responder.openViewTriggerID != "trigger-1" {
 		t.Fatalf("triggerID = %q", responder.openViewTriggerID)
 	}
@@ -204,8 +220,68 @@ func TestHandleSlashCommandAcknowledgesAndOpensLaunchModal(t *testing.T) {
 	}
 }
 
+func TestHandleSlashCommandPostsEphemeralErrorWhenListFails(t *testing.T) {
+	launcher := &fakeKedaLauncher{listErr: errors.New("boom")}
+	responder := &fakeSlackResponder{}
+	handler := newTestHandler(launcher, responder)
+
+	handler.HandleSlashCommand(&socketmode.Event{
+		Data: slack.SlashCommand{
+			UserID:      "U123",
+			ChannelID:   "C123",
+			TriggerID:   "trigger-1",
+			ResponseURL: "https://hooks.slack.test/response",
+		},
+	}, nil)
+
+	if responder.ackSuccessCalls != 1 {
+		t.Fatalf("ackSuccessCalls = %d", responder.ackSuccessCalls)
+	}
+	if responder.openViewCalls != 0 {
+		t.Fatalf("openViewCalls = %d", responder.openViewCalls)
+	}
+	if len(responder.errorPosts) != 1 {
+		t.Fatalf("errorPosts = %d", len(responder.errorPosts))
+	}
+	if responder.errorPosts[0].text != "Failed to load launch targets." {
+		t.Fatalf("error text = %q", responder.errorPosts[0].text)
+	}
+}
+
+func TestHandleSlashCommandPostsEphemeralErrorWhenNoTargetsExist(t *testing.T) {
+	launcher := &fakeKedaLauncher{listResp: []domainclient.ScaledObject{}}
+	responder := &fakeSlackResponder{}
+	handler := newTestHandler(launcher, responder)
+
+	handler.HandleSlashCommand(&socketmode.Event{
+		Data: slack.SlashCommand{
+			UserID:      "U123",
+			ChannelID:   "C123",
+			TriggerID:   "trigger-1",
+			ResponseURL: "https://hooks.slack.test/response",
+		},
+	}, nil)
+
+	if responder.ackSuccessCalls != 1 {
+		t.Fatalf("ackSuccessCalls = %d", responder.ackSuccessCalls)
+	}
+	if responder.openViewCalls != 0 {
+		t.Fatalf("openViewCalls = %d", responder.openViewCalls)
+	}
+	if len(responder.errorPosts) != 1 {
+		t.Fatalf("errorPosts = %d", len(responder.errorPosts))
+	}
+	if responder.errorPosts[0].text != "No launch targets are currently available." {
+		t.Fatalf("error text = %q", responder.errorPosts[0].text)
+	}
+}
+
 func TestHandleSlashCommandPostsEphemeralErrorWhenOpenViewFails(t *testing.T) {
-	launcher := &fakeKedaLauncher{}
+	launcher := &fakeKedaLauncher{
+		listResp: []domainclient.ScaledObject{
+			{Namespace: "default", Name: "worker"},
+		},
+	}
 	responder := &fakeSlackResponder{openViewErr: errors.New("boom")}
 	handler := newTestHandler(launcher, responder)
 
@@ -236,11 +312,8 @@ func TestHandleLaunchSubmissionReturnsViewErrorsForInvalidInput(t *testing.T) {
 			View: slack.View{
 				PrivateMetadata: mustEncodeCommandMetadata(t),
 				State: &slack.ViewState{Values: map[string]map[string]slack.BlockAction{
-					"keda_namespace": {
-						"namespace": {Value: ""},
-					},
-					"keda_scaled_object_name": {
-						"scaled_object_name": {Value: "worker"},
+					"keda_target": {
+						"target": {SelectedOption: slack.OptionBlockObject{Value: ""}},
 					},
 					"keda_duration": {
 						"duration": {Value: "soon"},
@@ -281,11 +354,8 @@ func TestHandleLaunchSubmissionLaunchesAndPostsAcceptedMessage(t *testing.T) {
 			View: slack.View{
 				PrivateMetadata: mustEncodeCommandMetadata(t),
 				State: &slack.ViewState{Values: map[string]map[string]slack.BlockAction{
-					"keda_namespace": {
-						"namespace": {Value: " default "},
-					},
-					"keda_scaled_object_name": {
-						"scaled_object_name": {Value: " worker "},
+					"keda_target": {
+						"target": {SelectedOption: slack.OptionBlockObject{Value: `{"namespace":" default ","name":" worker "}`}},
 					},
 					"keda_duration": {
 						"duration": {Value: "10m"},
@@ -332,11 +402,8 @@ func TestHandleLaunchSubmissionPostsEphemeralErrorWhenLaunchFails(t *testing.T) 
 			View: slack.View{
 				PrivateMetadata: mustEncodeCommandMetadata(t),
 				State: &slack.ViewState{Values: map[string]map[string]slack.BlockAction{
-					"keda_namespace": {
-						"namespace": {Value: "default"},
-					},
-					"keda_scaled_object_name": {
-						"scaled_object_name": {Value: "worker"},
+					"keda_target": {
+						"target": {SelectedOption: slack.OptionBlockObject{Value: `{"namespace":"default","name":"worker"}`}},
 					},
 					"keda_duration": {
 						"duration": {Value: "10m"},
@@ -361,7 +428,7 @@ func TestHandleChangeActionAcknowledgesAndOpensModal(t *testing.T) {
 
 	handler.HandleChangeAction(&socketmode.Event{
 		Data: slack.InteractionCallback{
-			TriggerID: "trigger-1",
+			TriggerID:   "trigger-1",
 			ResponseURL: "https://hooks.slack.test/fallback",
 			ActionCallback: slack.ActionCallbacks{
 				BlockActions: []*slack.BlockAction{
