@@ -28,6 +28,10 @@ func (k *KedaLaunchHandler) HandleCancelAction(evt *socketmode.Event, client *so
 		}
 		return
 	}
+	if interaction.ResponseURL != "" {
+		// Use the accepted-message action response URL so the follow-up post can replace that artifact.
+		launchRequestMetadata.ResponseURL = interaction.ResponseURL
+	}
 
 	if err := k.slackResponder.AckWithSuccess(evt, client); err != nil {
 		slog.Error("failed to ack", "error", err)

@@ -528,6 +528,9 @@ func TestHandleCancelActionPostsCanceledMessageOnSuccess(t *testing.T) {
 	if len(responder.webhooks) != 1 {
 		t.Fatalf("webhooks = %d", len(responder.webhooks))
 	}
+	if responder.webhooks[0].responseURL != "https://hooks.slack.test/fallback" {
+		t.Fatalf("responseURL = %q", responder.webhooks[0].responseURL)
+	}
 	if !responder.webhooks[0].message.ReplaceOriginal {
 		t.Fatal("ReplaceOriginal = false")
 	}
@@ -557,6 +560,9 @@ func TestHandleCancelActionPostsEphemeralErrorWhenCancelFails(t *testing.T) {
 
 	if len(responder.errorPosts) != 1 {
 		t.Fatalf("errorPosts = %d", len(responder.errorPosts))
+	}
+	if responder.errorPosts[0].responseURL != "https://hooks.slack.test/fallback" {
+		t.Fatalf("responseURL = %q", responder.errorPosts[0].responseURL)
 	}
 	if responder.errorPosts[0].text != "Launch request was not canceled and might still be active." {
 		t.Fatalf("error text = %q", responder.errorPosts[0].text)
